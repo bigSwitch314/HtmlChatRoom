@@ -20,11 +20,6 @@ nohup /usr/local/php/bin/php /home/wwwroot/websocket/server.php
 
 **参考的Github项目：**
 
-1.
-
 **zhenbianshu/websocket**：[https://github.com/zhenbianshu/websocket](https://github.com/zhenbianshu/websocket)
 
-zhenbianshu发表的文章：[网页实时聊天之PHP实现websocket](http://www.cnblogs.com/zhenbianshu/p/6111257.html)
 
-
-2.
