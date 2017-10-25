@@ -47,6 +47,7 @@
      * msg.content: 消息内容
      */
     ws.onmessage = function (e) {
+        console.log(e.data);
         var msg = JSON.parse(e.data);
         var sender, user_name, name_list, change_type;
 

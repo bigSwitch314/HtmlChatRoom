@@ -4,34 +4,25 @@ set_time_limit(0);// 设置超时时间为无限,防止超时
 date_default_timezone_set('Asia/shanghai');
 
 class WebSocket {
-    const LOG_PATH = '/tmp/';
-    const LISTEN_SOCKET_NUM = 9;
+    const LOG_PATH = '/tmp/';  //日志文件存放目录
+    const LISTEN_SOCKET_NUM = 9;   //socket最大连接数
 
-    /**
-     * @var array $sockets
-     *    [
-     *      (int)$socket => [
-     *                        info
-     *                      ]
-     *      ]
-     *  todo 解释socket与file号对应
-     */
-    private $sockets = [];
-    private $master;
+    private $sockets = [];  //所有已连接的socket资源
+    private $res_socket;  //socket资源
 
     public function __construct($host, $port) {
         try {
-            $this->master = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+            //创建socket,返回socket资源
+            $this->res_socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
             // 设置IP和端口重用,在重启服务器后能重新使用此端口;
-            socket_set_option($this->master, SOL_SOCKET, SO_REUSEADDR, 1);
+            socket_set_option($this->res_socket, SOL_SOCKET, SO_REUSEADDR, 1);
             // 将IP和端口绑定在服务器socket上;
-            socket_bind($this->master, $host, $port);
-            // listen函数使用主动连接套接口变为被连接套接口，使得一个进程可以接受其它进程的请求，从而成为一个服务器进程。在TCP服务器编程中listen函数把进程变为一个服务器，并指定相应的套接字变为被动连接,其中的能存储的请求不明的socket数目。
-            socket_listen($this->master, self::LISTEN_SOCKET_NUM);
+            socket_bind($this->res_socket, $host, $port);
+            // 监听socket连接
+            socket_listen($this->res_socket, self::LISTEN_SOCKET_NUM);
         } catch (\Exception $e) {
             $err_code = socket_last_error();
             $err_msg = socket_strerror($err_code);
-
             $this->error([
                 'error_init_server',
                 $err_code,
@@ -39,10 +30,14 @@ class WebSocket {
             ]);
         }
 
-        $this->sockets[0] = ['resource' => $this->master];
-        $pid = posix_getpid();
-        $this->debug(["server: {$this->master} started,pid: {$pid}"]);
+        //把服务器socket加入sockets池中
+        $this->sockets[0] = ['resource' => $this->res_socket];
 
+        //获取进程id，linux函数
+        $pid = posix_getpid();
+        $this->debug(["server: {$this->res_socket} started,pid: {$pid}"]);
+
+        // 服务，循环执行
         while (true) {
             try {
                 $this->doServer();
@@ -58,9 +53,8 @@ class WebSocket {
 
     private function doServer() {
         $write = $except = NULL;
-        $sockets = array_column($this->sockets, 'resource');
-        $read_num = socket_select($sockets, $write, $except, NULL);
-        // select作为监视函数,参数分别是(监视可读,可写,异常,超时时间),返回可操作数目,出错时返回false;
+        $sockets = array_column($this->sockets, 'resource');  //返回sockets数组中键值为'resource'的列
+        $read_num = socket_select($sockets, $write, $except, NULL);  // socket监视函数,参数分别是(监视可读,可写,异常,超时时间),返回可操作数目,出错时返回false;
         if (false === $read_num) {
             $this->error([
                 'error_select',
@@ -72,9 +66,8 @@ class WebSocket {
 
         foreach ($sockets as $socket) {
             // 如果可读的是服务器socket,则处理连接逻辑
-            if ($socket == $this->master) {
-                $client = socket_accept($this->master);
-                // 创建,绑定,监听后accept函数将会接受socket要来的连接,一旦有一个连接成功,将会返回一个新的socket资源用以交互,如果是一个多个连接的队列,只会处理第一个,如果没有连接的话,进程将会被阻塞,直到连接上.如果用set_socket_blocking或socket_set_noblock()设置了阻塞,会返回false;返回资源后,将会持续等待连接。
+            if ($socket == $this->res_socket) {
+                $client = socket_accept($this->res_socket);  // 阻塞型函数，如果有socket连接就会返回socket资源,错误返回false。socket资源实际上是一个Unix文件操作符，是整形数据
                 if (false === $client) {
                     $this->error([
                         'err_accept',
@@ -83,26 +76,25 @@ class WebSocket {
                     ]);
                     continue;
                 } else {
-                    self::connect($client);
+                    self::connect($client);  //将socket添加到已连接列表,但握手状态留空（false）
                     continue;
                 }
             } else {
                 // 如果可读的是其他已连接socket,则读取其数据,并处理应答逻辑
-                $bytes = @socket_recv($socket, $buffer, 2048, 0);
+                $bytes = @socket_recv($socket, $buffer, 2048, 0);  //从socket中接收数据
                 if ($bytes < 9) {
                     $recv_msg = $this->disconnect($socket);
                 } else {
-                    if (!$this->sockets[(int)$socket]['handshake']) {
-                        self::handShake($socket, $buffer);
+                    if (!$this->sockets[(int)$socket]['handshake']) {  //判断是否已经握手
+                        self::handShake($socket, $buffer);  //握手
                         continue;
                     } else {
                         $recv_msg = self::parse($buffer);
                     }
                 }
-                array_unshift($recv_msg, 'receive_msg');
-                $msg = self::dealMsg($socket, $recv_msg);
-
-                $this->broadcast($msg);
+                //array_unshift($recv_msg, 'receive_msg');  //在数组$recv_msg开头插入元素'receive_msg'
+                $msg = self::dealMsg($socket, $recv_msg);  //拼装广播信息
+                $this->broadcast($msg);  //广播消息
             }
         }
     }
@@ -113,7 +105,7 @@ class WebSocket {
      * @param $socket
      */
     public function connect($socket) {
-        socket_getpeername($socket, $ip, $port);
+        socket_getpeername($socket, $ip, $port);  //获取远程主机的ip地址和端口
         $socket_info = [
             'resource' => $socket,
             'uname' => '',
@@ -121,8 +113,8 @@ class WebSocket {
             'ip' => $ip,
             'port' => $port,
         ];
-        $this->sockets[(int)$socket] = $socket_info;
-        $this->debug(array_merge(['socket_connect'], $socket_info));
+        $this->sockets[(int)$socket] = $socket_info;  //把当前连接socket,加入已连接sockets数组中
+        $this->debug(array_merge(['socket_connect'], $socket_info));  //日志记录：socket连接信息
     }
 
     /**
@@ -137,9 +129,9 @@ class WebSocket {
             'type' => 'logout',
             'content' => $this->sockets[(int)$socket]['uname'],
         ];
-        unset($this->sockets[(int)$socket]);
+        unset($this->sockets[(int)$socket]);  //从sockets数组中删除已经关闭的socket链接信息
 
-        return $recv_msg;
+        return $recv_msg;  //返回退出用户信息
     }
 
     /**
@@ -166,6 +158,7 @@ class WebSocket {
         socket_write($socket, $upgrade_message, strlen($upgrade_message));// 向socket里写入升级信息
         $this->sockets[(int)$socket]['handshake'] = true;
 
+        //记录调试信息
         socket_getpeername($socket, $ip, $port);
         $this->debug([
             'hand_shake',
@@ -245,7 +238,7 @@ class WebSocket {
     }
 
     /**
-     * 拼装信息
+     * 拼装信息，用于广播
      *
      * @param $socket
      * @param $recv_msg
@@ -294,7 +287,7 @@ class WebSocket {
      */
     private function broadcast($data) {
         foreach ($this->sockets as $socket) {
-            if ($socket['resource'] == $this->master) {
+            if ($socket['resource'] == $this->res_socket) {
                 continue;
             }
             socket_write($socket['resource'], $data, strlen($data));
